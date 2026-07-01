@@ -20,6 +20,7 @@ from anthropic import Anthropic
 from pypdf import PdfReader
 import docx
 import openpyxl
+import xlrd
 
 # ---------------------------------------------------------------------------
 # Configuration generale
@@ -212,6 +213,18 @@ def lire_xlsx(donnees: bytes) -> str:
     return "\n".join(morceaux)
 
 
+def lire_xls(donnees: bytes) -> str:
+    classeur = xlrd.open_workbook(file_contents=donnees)
+    morceaux = []
+    for feuille in classeur.sheets():
+        morceaux.append(f"--- Feuille : {feuille.name} ---")
+        for num_ligne in range(feuille.nrows):
+            valeurs = [str(v) for v in feuille.row_values(num_ligne) if v not in ("", None)]
+            if valeurs:
+                morceaux.append(" | ".join(valeurs))
+    return "\n".join(morceaux)
+
+
 def lire_txt(donnees: bytes) -> str:
     return donnees.decode("utf-8", errors="ignore")
 
@@ -225,6 +238,8 @@ def extraire_texte(nom_fichier: str, donnees: bytes) -> str:
             texte = lire_docx(donnees)
         elif extension == "xlsx":
             texte = lire_xlsx(donnees)
+        elif extension == "xls":
+            texte = lire_xls(donnees)
         elif extension in ("txt", "md", "csv"):
             texte = lire_txt(donnees)
         else:
@@ -345,7 +360,7 @@ else:
     with st.expander("📎 Documents pour cette conversation"):
         fichiers_uploades = st.file_uploader(
             "Ajouter un ou plusieurs documents (PDF, Word, Excel, texte)",
-            type=["pdf", "docx", "xlsx", "txt", "md", "csv"],
+            type=["pdf", "docx", "xlsx", "xls", "txt", "md", "csv"],
             accept_multiple_files=True,
             key=f"upload_{agent}",
         )
