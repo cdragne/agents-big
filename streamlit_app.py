@@ -3,13 +3,23 @@ Chatbot Agents BIG — application Streamlit
 Dashboard avec 7 agents specialises (persona + connaissances metier),
 chacun discutable via l'API Anthropic (Claude).
 
+Fonctionnalites documents :
+- Documents communs : tout fichier depose dans le dossier "documents/" du repo
+  est lu automatiquement et connu par tous les agents en permanence.
+- Documents ponctuels : chaque agent permet d'uploader un fichier (PDF, Word,
+  Excel, texte) valable pour la conversation en cours uniquement.
+
 Lancement local : streamlit run streamlit_app.py
 Deploiement gratuit : voir README.md
 """
 
 import os
+import io
 import streamlit as st
 from anthropic import Anthropic
+from pypdf import PdfReader
+import docx
+import openpyxl
 
 # ---------------------------------------------------------------------------
 # Configuration generale
@@ -22,6 +32,10 @@ st.set_page_config(
 )
 
 MODEL = "claude-sonnet-4-5"
+
+DOSSIER_DOCUMENTS_COMMUNS = "documents"
+TAILLE_MAX_PAR_DOCUMENT = 12000       # caracteres max extraits par document
+TAILLE_MAX_TOTALE_CONTEXTE = 40000    # caracteres max, tous documents confondus
 
 CONTEXTE_ENTREPRISE = """
 Contexte entreprise (a toujours garder en tete) :
@@ -44,6 +58,12 @@ Important : tu n'as pas d'acces direct a Notion, Outlook ou aux autres outils in
 BIG dans cette application. Si une question necessite des donnees precises que tu n'as pas
 (chiffres exacts, liste d'affaires en cours...), dis-le clairement et demande a Christophe
 de te donner les chiffres ou de coller les donnees, plutot que d'inventer des valeurs.
+
+Des documents peuvent t'etre fournis (documents communs de l'entreprise et/ou documents
+ajoutes par Christophe pour cette conversation). Ils apparaissent ci-dessous entre les
+balises <documents_communs> et <documents_conversation>. Appuie-toi dessus en priorite
+quand ils sont pertinents pour la question posee, et cite le nom du document si tu t'en
+sers. Si les documents ne contiennent pas l'information demandee, dis-le clairement.
 """
 
 AGENTS = {
@@ -157,6 +177,94 @@ a Christophe de coller le contenu pertinent si besoin.
 }
 
 # ---------------------------------------------------------------------------
+# Extraction de texte depuis les documents
+# ---------------------------------------------------------------------------
+
+
+def _tronquer(texte: str, limite: int = TAILLE_MAX_PAR_DOCUMENT) -> str:
+    if len(texte) > limite:
+        return texte[:limite] + "\n[...document tronque, trop volumineux...]"
+    return texte
+
+
+def lire_pdf(donnees: bytes) -> str:
+    lecteur = PdfReader(io.BytesIO(donnees))
+    pages = [page.extract_text() or "" for page in lecteur.pages]
+    return "\n".join(pages)
+
+
+def lire_docx(donnees: bytes) -> str:
+    document = docx.Document(io.BytesIO(donnees))
+    paragraphes = [p.text for p in document.paragraphs]
+    return "\n".join(paragraphes)
+
+
+def lire_xlsx(donnees: bytes) -> str:
+    classeur = openpyxl.load_workbook(io.BytesIO(donnees), data_only=True)
+    morceaux = []
+    for nom_feuille in classeur.sheetnames:
+        feuille = classeur[nom_feuille]
+        morceaux.append(f"--- Feuille : {nom_feuille} ---")
+        for ligne in feuille.iter_rows(values_only=True):
+            valeurs = [str(v) for v in ligne if v is not None]
+            if valeurs:
+                morceaux.append(" | ".join(valeurs))
+    return "\n".join(morceaux)
+
+
+def lire_txt(donnees: bytes) -> str:
+    return donnees.decode("utf-8", errors="ignore")
+
+
+def extraire_texte(nom_fichier: str, donnees: bytes) -> str:
+    extension = nom_fichier.lower().rsplit(".", 1)[-1] if "." in nom_fichier else ""
+    try:
+        if extension == "pdf":
+            texte = lire_pdf(donnees)
+        elif extension == "docx":
+            texte = lire_docx(donnees)
+        elif extension == "xlsx":
+            texte = lire_xlsx(donnees)
+        elif extension in ("txt", "md", "csv"):
+            texte = lire_txt(donnees)
+        else:
+            return f"[Format .{extension} non pris en charge pour {nom_fichier}]"
+    except Exception as erreur:
+        return f"[Erreur de lecture de {nom_fichier} : {erreur}]"
+    return _tronquer(texte)
+
+
+@st.cache_data(show_spinner=False)
+def charger_documents_communs():
+    """Lit tous les fichiers du dossier documents/ (une seule fois, mis en cache)."""
+    resultats = []
+    if os.path.isdir(DOSSIER_DOCUMENTS_COMMUNS):
+        for nom_fichier in sorted(os.listdir(DOSSIER_DOCUMENTS_COMMUNS)):
+            chemin = os.path.join(DOSSIER_DOCUMENTS_COMMUNS, nom_fichier)
+            if os.path.isfile(chemin):
+                with open(chemin, "rb") as f:
+                    donnees = f.read()
+                texte = extraire_texte(nom_fichier, donnees)
+                resultats.append({"nom": nom_fichier, "texte": texte})
+    return resultats
+
+
+def construire_bloc_documents(documents: list, balise: str) -> str:
+    if not documents:
+        return f"<{balise}>\n(aucun document)\n</{balise}>"
+    morceaux = [f"<{balise}>"]
+    total = 0
+    for doc in documents:
+        if total >= TAILLE_MAX_TOTALE_CONTEXTE:
+            morceaux.append("[...limite globale de documents atteinte, documents suivants ignores...]")
+            break
+        morceaux.append(f"--- Document : {doc['nom']} ---\n{doc['texte']}")
+        total += len(doc["texte"])
+    morceaux.append(f"</{balise}>")
+    return "\n".join(morceaux)
+
+
+# ---------------------------------------------------------------------------
 # Etat de session
 # ---------------------------------------------------------------------------
 
@@ -165,6 +273,9 @@ if "agent_actif" not in st.session_state:
 
 if "historiques" not in st.session_state:
     st.session_state.historiques = {nom: [] for nom in AGENTS}
+
+if "documents_conversation" not in st.session_state:
+    st.session_state.documents_conversation = {nom: [] for nom in AGENTS}
 
 
 def get_client():
@@ -193,7 +304,21 @@ with st.sidebar:
     if st.session_state.agent_actif:
         if st.button("🗑️ Effacer cette conversation", use_container_width=True):
             st.session_state.historiques[st.session_state.agent_actif] = []
+            st.session_state.documents_conversation[st.session_state.agent_actif] = []
             st.rerun()
+
+    st.divider()
+    documents_communs = charger_documents_communs()
+    with st.expander(f"📚 Documents communs ({len(documents_communs)})"):
+        if documents_communs:
+            for doc in documents_communs:
+                st.caption(f"• {doc['nom']}")
+        else:
+            st.caption(
+                "Aucun document commun. Deposez des fichiers dans le dossier "
+                "'documents/' du repository GitHub pour les rendre disponibles "
+                "a tous les agents."
+            )
 
 # ---------------------------------------------------------------------------
 # Zone principale
@@ -216,6 +341,35 @@ else:
     st.title(f"{infos['icone']} Agent {agent}")
     st.caption(infos["resume"])
 
+    # --- Documents pour cette conversation ---
+    with st.expander("📎 Documents pour cette conversation"):
+        fichiers_uploades = st.file_uploader(
+            "Ajouter un ou plusieurs documents (PDF, Word, Excel, texte)",
+            type=["pdf", "docx", "xlsx", "txt", "md", "csv"],
+            accept_multiple_files=True,
+            key=f"upload_{agent}",
+        )
+        if fichiers_uploades:
+            noms_deja_charges = {d["nom"] for d in st.session_state.documents_conversation[agent]}
+            for fichier in fichiers_uploades:
+                if fichier.name not in noms_deja_charges:
+                    texte = extraire_texte(fichier.name, fichier.read())
+                    st.session_state.documents_conversation[agent].append(
+                        {"nom": fichier.name, "texte": texte}
+                    )
+
+        docs_agent = st.session_state.documents_conversation[agent]
+        if docs_agent:
+            st.caption("Documents actifs dans cette conversation :")
+            for i, doc in enumerate(docs_agent):
+                col1, col2 = st.columns([5, 1])
+                col1.write(f"📄 {doc['nom']}")
+                if col2.button("✕", key=f"suppr_{agent}_{i}"):
+                    st.session_state.documents_conversation[agent].pop(i)
+                    st.rerun()
+        else:
+            st.caption("Aucun document ajoute pour cette conversation.")
+
     for message in st.session_state.historiques[agent]:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
@@ -226,6 +380,13 @@ else:
         with st.chat_message("user"):
             st.markdown(question)
 
+        # Construction du system prompt avec documents (communs + conversation)
+        bloc_communs = construire_bloc_documents(documents_communs, "documents_communs")
+        bloc_conversation = construire_bloc_documents(
+            st.session_state.documents_conversation[agent], "documents_conversation"
+        )
+        system_avec_documents = infos["system"] + "\n\n" + bloc_communs + "\n\n" + bloc_conversation
+
         client = get_client()
         with st.chat_message("assistant"):
             placeholder = st.empty()
@@ -233,7 +394,7 @@ else:
             with client.messages.stream(
                 model=MODEL,
                 max_tokens=2000,
-                system=infos["system"],
+                system=system_avec_documents,
                 messages=st.session_state.historiques[agent],
             ) as stream:
                 for texte in stream.text_stream:
