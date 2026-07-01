@@ -67,6 +67,13 @@ ajoutes par Christophe pour cette conversation). Ils apparaissent ci-dessous ent
 balises <documents_communs> et <documents_conversation>. Appuie-toi dessus en priorite
 quand ils sont pertinents pour la question posee, et cite le nom du document si tu t'en
 sers. Si les documents ne contiennent pas l'information demandee, dis-le clairement.
+
+Modeles de documents : si un document commun est un modele/trame (devis type, memoire
+technique type, contrat type...), et que Christophe te demande de rediger un document du
+meme genre, structure ta reponse en suivant les memes sections, le meme ordre et le meme
+style que ce modele — en adaptant uniquement le contenu a la situation actuelle. Utilise
+des titres (#, ##) et des listes (-) dans ta reponse pour que la mise en forme soit
+preservee si Christophe exporte ta reponse en Word, Excel, PDF ou PowerPoint.
 """
 
 AGENTS = {
@@ -253,16 +260,20 @@ def extraire_texte(nom_fichier: str, donnees: bytes) -> str:
 
 @st.cache_data(show_spinner=False)
 def charger_documents_communs():
-    """Lit tous les fichiers du dossier documents/ (une seule fois, mis en cache)."""
+    """Lit tous les fichiers du dossier documents/ et ses sous-dossiers
+    (ex: documents/modeles/) - une seule fois, mis en cache."""
     resultats = []
     if os.path.isdir(DOSSIER_DOCUMENTS_COMMUNS):
-        for nom_fichier in sorted(os.listdir(DOSSIER_DOCUMENTS_COMMUNS)):
-            chemin = os.path.join(DOSSIER_DOCUMENTS_COMMUNS, nom_fichier)
-            if os.path.isfile(chemin):
+        for dossier_actuel, _, fichiers in os.walk(DOSSIER_DOCUMENTS_COMMUNS):
+            for nom_fichier in sorted(fichiers):
+                if nom_fichier == ".gitkeep":
+                    continue
+                chemin = os.path.join(dossier_actuel, nom_fichier)
+                chemin_relatif = os.path.relpath(chemin, DOSSIER_DOCUMENTS_COMMUNS)
                 with open(chemin, "rb") as f:
                     donnees = f.read()
                 texte = extraire_texte(nom_fichier, donnees)
-                resultats.append({"nom": nom_fichier, "texte": texte})
+                resultats.append({"nom": chemin_relatif, "texte": texte})
     return resultats
 
 
