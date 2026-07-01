@@ -4,3 +4,5 @@ pypdf
 python-docx
 openpyxl
 xlrd
+python-pptx
+fpdf2

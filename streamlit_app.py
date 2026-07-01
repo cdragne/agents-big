@@ -21,6 +21,8 @@ from pypdf import PdfReader
 import docx
 import openpyxl
 import xlrd
+from pptx import Presentation
+from fpdf import FPDF
 
 # ---------------------------------------------------------------------------
 # Configuration generale
@@ -280,6 +282,182 @@ def construire_bloc_documents(documents: list, balise: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Generation de documents (Word, Excel, PDF, PowerPoint) a partir d'une reponse
+# ---------------------------------------------------------------------------
+
+MOTS_CLES_EXPORT = [
+    "word", ".docx", "excel", ".xlsx", "pdf", "powerpoint", "pptx",
+    "diaporama", "presentation", "présentation", "genere un document",
+    "génère un document", "genere un fichier", "génère un fichier",
+    "exporte", "télécharge", "telecharge",
+]
+
+
+def question_demande_export(question: str) -> bool:
+    q = question.lower()
+    return any(mot in q for mot in MOTS_CLES_EXPORT)
+
+
+def analyser_markdown_simple(texte: str):
+    """Decoupe une reponse texte/markdown en elements structurés
+    (titres, puces, paragraphes) reutilisables pour chaque format de sortie."""
+    elements = []
+    for ligne in texte.split("\n"):
+        ligne_strip = ligne.strip()
+        if not ligne_strip:
+            continue
+        if ligne_strip.startswith("### "):
+            elements.append(("titre3", ligne_strip[4:].strip()))
+        elif ligne_strip.startswith("## "):
+            elements.append(("titre2", ligne_strip[3:].strip()))
+        elif ligne_strip.startswith("# "):
+            elements.append(("titre1", ligne_strip[2:].strip()))
+        elif ligne_strip.startswith(("- ", "* ")):
+            elements.append(("puce", ligne_strip[2:].strip()))
+        else:
+            elements.append(("paragraphe", ligne_strip))
+    return elements
+
+
+def generer_word(texte: str, titre_document: str) -> bytes:
+    document = docx.Document()
+    document.add_heading(titre_document, level=0)
+    for type_element, contenu in analyser_markdown_simple(texte):
+        if type_element == "titre1":
+            document.add_heading(contenu, level=1)
+        elif type_element == "titre2":
+            document.add_heading(contenu, level=2)
+        elif type_element == "titre3":
+            document.add_heading(contenu, level=3)
+        elif type_element == "puce":
+            document.add_paragraph(contenu, style="List Bullet")
+        else:
+            document.add_paragraph(contenu)
+    tampon = io.BytesIO()
+    document.save(tampon)
+    return tampon.getvalue()
+
+
+def generer_excel(texte: str, titre_document: str) -> bytes:
+    classeur = openpyxl.Workbook()
+    feuille = classeur.active
+    feuille.title = "Document"
+    feuille["A1"] = titre_document
+    feuille["A1"].font = openpyxl.styles.Font(bold=True, size=14)
+    ligne_actuelle = 3
+    for type_element, contenu in analyser_markdown_simple(texte):
+        if type_element in ("titre1", "titre2", "titre3"):
+            cellule = feuille.cell(row=ligne_actuelle, column=1, value=contenu)
+            cellule.font = openpyxl.styles.Font(bold=True)
+        elif " | " in contenu:
+            for i, valeur in enumerate(contenu.split(" | ")):
+                feuille.cell(row=ligne_actuelle, column=1 + i, value=valeur.strip())
+        elif type_element == "puce":
+            feuille.cell(row=ligne_actuelle, column=1, value=f"• {contenu}")
+        else:
+            feuille.cell(row=ligne_actuelle, column=1, value=contenu)
+        ligne_actuelle += 1
+    feuille.column_dimensions["A"].width = 80
+    tampon = io.BytesIO()
+    classeur.save(tampon)
+    return tampon.getvalue()
+
+
+def generer_pdf(texte: str, titre_document: str) -> bytes:
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.multi_cell(0, 10, titre_document.encode("latin-1", "replace").decode("latin-1"))
+    pdf.ln(4)
+    tailles = {"titre1": 14, "titre2": 12, "titre3": 11}
+    for type_element, contenu in analyser_markdown_simple(texte):
+        contenu_propre = contenu.encode("latin-1", "replace").decode("latin-1")
+        if type_element in tailles:
+            pdf.set_font("Helvetica", "B", tailles[type_element])
+            pdf.multi_cell(0, 7, contenu_propre)
+        elif type_element == "puce":
+            pdf.set_font("Helvetica", "", 11)
+            pdf.multi_cell(0, 6, f"-  {contenu_propre}")
+        else:
+            pdf.set_font("Helvetica", "", 11)
+            pdf.multi_cell(0, 6, contenu_propre)
+        pdf.ln(1)
+    return bytes(pdf.output())
+
+
+def generer_pptx(texte: str, titre_document: str) -> bytes:
+    presentation = Presentation()
+
+    diapo_titre = presentation.slides.add_slide(presentation.slide_layouts[0])
+    diapo_titre.shapes.title.text = titre_document
+    if len(diapo_titre.placeholders) > 1:
+        diapo_titre.placeholders[1].text = "Genere par l'agent BIG"
+
+    def nouvelle_diapo(titre_diapo: str):
+        diapo = presentation.slides.add_slide(presentation.slide_layouts[1])
+        diapo.shapes.title.text = titre_diapo
+        return diapo.placeholders[1].text_frame
+
+    zone_texte = nouvelle_diapo("Contenu")
+    premier_ajout = True
+
+    for type_element, contenu in analyser_markdown_simple(texte):
+        if type_element in ("titre1", "titre2"):
+            zone_texte = nouvelle_diapo(contenu)
+            premier_ajout = True
+        else:
+            if premier_ajout:
+                paragraphe = zone_texte.paragraphs[0]
+                premier_ajout = False
+            else:
+                paragraphe = zone_texte.add_paragraph()
+            paragraphe.text = contenu
+
+    tampon = io.BytesIO()
+    presentation.save(tampon)
+    return tampon.getvalue()
+
+
+def nom_fichier_propre(chaine: str) -> str:
+    autorises = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+    nettoye = "".join(c if c in autorises else "_" for c in chaine)
+    return nettoye[:60]
+
+
+def afficher_boutons_export(contenu: str, agent: str, cle_unique: str):
+    titre_document = f"Reponse - Agent {agent}"
+    nom_base = nom_fichier_propre(f"{agent}_{cle_unique}")
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.download_button(
+            "📄 Word", data=generer_word(contenu, titre_document),
+            file_name=f"{nom_base}.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            key=f"word_{nom_base}", use_container_width=True,
+        )
+    with col2:
+        st.download_button(
+            "📊 Excel", data=generer_excel(contenu, titre_document),
+            file_name=f"{nom_base}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key=f"excel_{nom_base}", use_container_width=True,
+        )
+    with col3:
+        st.download_button(
+            "📕 PDF", data=generer_pdf(contenu, titre_document),
+            file_name=f"{nom_base}.pdf", mime="application/pdf",
+            key=f"pdf_{nom_base}", use_container_width=True,
+        )
+    with col4:
+        st.download_button(
+            "📽️ PowerPoint", data=generer_pptx(contenu, titre_document),
+            file_name=f"{nom_base}.pptx",
+            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            key=f"pptx_{nom_base}", use_container_width=True,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Etat de session
 # ---------------------------------------------------------------------------
 
@@ -385,9 +563,11 @@ else:
         else:
             st.caption("Aucun document ajoute pour cette conversation.")
 
-    for message in st.session_state.historiques[agent]:
+    for idx, message in enumerate(st.session_state.historiques[agent]):
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
+            if message["role"] == "assistant":
+                afficher_boutons_export(message["content"], agent, f"hist{idx}")
 
     question = st.chat_input(f"Ecrivez a l'agent {agent}...")
     if question:
@@ -418,4 +598,10 @@ else:
 
         st.session_state.historiques[agent].append(
             {"role": "assistant", "content": reponse_complete}
+        )
+
+        if question_demande_export(question):
+            st.info("📎 Document pret : choisissez le format ci-dessous.")
+        afficher_boutons_export(
+            reponse_complete, agent, f"nouv{len(st.session_state.historiques[agent])}"
         )
