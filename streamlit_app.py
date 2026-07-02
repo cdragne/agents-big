@@ -548,7 +548,7 @@ else:
     # --- Documents pour cette conversation ---
     with st.expander("📎 Documents pour cette conversation"):
         fichiers_uploades = st.file_uploader(
-            "Ajouter un ou plusieurs documents (PDF, Word, Excel, texte, images, vidéos)"
+            "Ajouter un ou plusieurs documents (PDF, Word, Excel, texte, images, vidéos)",
             type=["pdf", "docx", "xlsx", "xls", "txt", "md", "csv", "jpg", "jpeg", "png", "mp4", "mov", "avi"],
             accept_multiple_files=True,
             key=f"upload_{agent}",
